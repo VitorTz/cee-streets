@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Processador de CEPs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+<script src="script.js" defer></script>
+</head>
+<body>
+
+<main class="card">
+  <div class="stripe"></div>
+  <div class="content">
+    <input type="file" id="fileInput" accept=".xlsx" hidden />
+    <section id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Selecionar arquivo Excel">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>
+      </svg>
+      <p class="dz-title">Arraste a planilha .xlsx aqui</p>
+      <p class="dz-sub">ou <span class="link">clique para selecionar</span></p>
+      <p class="dz-file" id="fileName" hidden></p>
+    </section>
+
+    <div id="status" class="status" hidden>
+      <span class="spinner"></span>
+      <span id="statusText">Processando planilha…</span>
+    </div>
+
+    <div id="errorBox" class="error-box" hidden></div>
+
+    <section id="results" class="results" hidden>
+      <div class="stats-grid">
+        <div class="stat"><span class="stat-value" id="statRuas">–</span><span class="stat-label">ruas distintas</span></div>
+        <div class="stat"><span class="stat-value" id="statCeps">–</span><span class="stat-label">CEPs distintos</span></div>
+        <div class="stat"><span class="stat-value" id="statRuasMulti">–</span><span class="stat-label">ruas com +1 CEP</span></div>
+        <div class="stat"><span class="stat-value" id="statGrupos">–</span><span class="stat-label">grupos duplicados</span></div>
+        <div class="stat"><span class="stat-value" id="statCopiadas">–</span><span class="stat-label">linhas copiadas</span></div>
+        <div class="stat"><span class="stat-value" id="statTotal">–</span><span class="stat-label">linhas no arquivo final</span></div>
+      </div>
+      <div class="actions">
+        <a id="downloadLink" class="download-btn" download>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="M7 11l5 5 5-5"/><path d="M4 19h16"/></svg>
+          Baixar planilha processada
+        </a>
+        <button id="resetBtn" class="reset-btn" type="button">Processar outro arquivo</button>
+      </div>
+    </section>
+  </div>
+</main>
+
+</body>
+</html>
