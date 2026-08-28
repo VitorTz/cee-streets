@@ -268,3 +268,30 @@ h1 {
   border-color: var(--blue-bright);
   box-shadow: 0 0 0 3px rgba(25, 88, 194, 0.15);
 }
+
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.radio-option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.radio-option input[type="radio"] {
+  accent-color: var(--blue-bright);
+  margin: 0;
+  flex: none;
+  transform: translateY(1px);
+}
+
+.radio-hint {
+  color: var(--muted);
+  font-size: 12px;
+}

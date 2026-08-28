@@ -38,6 +38,7 @@ async function processStreetsExcel(file, options = {}) {
   const outputFileName = options.outputFileName || 'ruas_processado.xlsx';
   const targetStreetColumn = options.streetColumnName || 'nome trecho';
   const targetFinalColumn = options.finalColumnName || 'final';
+  const groupByBlock = options.groupByBlock === true;
 
   const buffer = await file.arrayBuffer();
   const workbook = new ExcelJS.Workbook();
@@ -114,56 +115,159 @@ async function processStreetsExcel(file, options = {}) {
   let totalCopiedRows = 0;
   
   const rowCount = sheet.rowCount;
-  
-  for (let i = rowCount; i >= 2; i--) {
-    const row = sheet.getRow(i);
-    
-    if (idxFinal) {
-      const finalCell = row.getCell(idxFinal);
-      const cellValue = finalCell.value && typeof finalCell.value === 'object' ? finalCell.value.result : finalCell.value;
+
+  if (!groupByBlock) {
+    // ---------------------------------------------------------------------
+    // Modo intercalado (padrão): para cada linha original, insere as
+    // cópias dela imediatamente abaixo dela mesma.
+    // ---------------------------------------------------------------------
+    for (let i = rowCount; i >= 2; i--) {
+      const row = sheet.getRow(i);
       
-      if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
-        finalCell.value = 99999;
+      if (idxFinal) {
+        const finalCell = row.getCell(idxFinal);
+        const cellValue = finalCell.value && typeof finalCell.value === 'object' ? finalCell.value.result : finalCell.value;
+        
+        if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
+          finalCell.value = 99999;
+        }
+      }
+
+      const streetVal = row.getCell(idxStreetName).value;
+      const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
+
+      const cepVal = row.getCell(idxCep).value;
+      const currentCep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
+
+      const streetCeps = Array.from(cepsByStreet.get(streetName) || []);
+      const otherCeps = streetCeps.filter(c => c !== currentCep);
+
+      if (otherCeps.length > 0) {
+        totalDuplicatedGroups++;
+      }
+
+      // Insert new cloned rows immediately below the current row (i + 1)
+      for (const targetCep of otherCeps) {
+        const color = getColorForCep(targetCep);
+
+        sheet.spliceRows(i + 1, 0, []); 
+        const newRow = sheet.getRow(i + 1);
+        totalCopiedRows++;
+
+        row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+          const targetCell = newRow.getCell(colNumber);
+          targetCell.value = cell.value; 
+          targetCell.style = cell.style; 
+        });
+
+        newRow.height = row.height;
+        newRow.getCell(idxCep).value = targetCep;
+
+        newRow.eachCell({ includeEmpty: true }, (cell) => {
+          const currentStyle = cell.style || {};
+          cell.style = {
+            ...currentStyle,
+            fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: color } }
+          };
+        });
+      }
+    }
+  } else {
+    // ---------------------------------------------------------------------
+    // Modo agrupado por bloco: primeiro identifica blocos contíguos
+    // (mesma rua + mesmo cep, linhas em sequência), depois insere cada
+    // cópia como um bloco inteiro logo abaixo do bloco original — em vez
+    // de intercalar linha a linha.
+    //
+    // Não fazemos um sort global antes disso (pra preservar a formatação
+    // e a ordem original do arquivo, como já era feito no modo
+    // intercalado) — os blocos são detectados na ordem física em que já
+    // aparecem na planilha. Se o arquivo não tiver as linhas de cada
+    // rua+cep já em sequência, blocos "quebrados" viram blocos separados.
+    // ---------------------------------------------------------------------
+    const blocks = [];
+    let currentBlock = null;
+    for (let i = 2; i <= rowCount; i++) {
+      const row = sheet.getRow(i);
+      const streetVal = row.getCell(idxStreetName).value;
+      const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
+      const cepVal = row.getCell(idxCep).value;
+      const cep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
+
+      if (currentBlock && currentBlock.streetName === streetName && currentBlock.cep === cep) {
+        currentBlock.endRow = i;
+      } else {
+        currentBlock = { startRow: i, endRow: i, streetName, cep };
+        blocks.push(currentBlock);
       }
     }
 
-    const streetVal = row.getCell(idxStreetName).value;
-    const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
+    // Processa os blocos de baixo para cima: como cada bloco insere linhas
+    // sempre abaixo do seu próprio fim original, isso nunca desloca os
+    // índices dos blocos que ainda faltam processar (que estão acima).
+    for (let b = blocks.length - 1; b >= 0; b--) {
+      const block = blocks[b];
 
-    const cepVal = row.getCell(idxCep).value;
-    const currentCep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
+      // Regra do "final vazio -> 99999", aplicada às linhas originais do
+      // bloco antes de tirarmos o retrato (snapshot) delas.
+      if (idxFinal) {
+        for (let r = block.startRow; r <= block.endRow; r++) {
+          const finalCell = sheet.getRow(r).getCell(idxFinal);
+          const cellValue = finalCell.value && typeof finalCell.value === 'object' ? finalCell.value.result : finalCell.value;
+          if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
+            finalCell.value = 99999;
+          }
+        }
+      }
 
-    const streetCeps = Array.from(cepsByStreet.get(streetName) || []);
-    const otherCeps = streetCeps.filter(c => c !== currentCep);
+      const streetCeps = Array.from(cepsByStreet.get(block.streetName) || []);
+      const otherCeps = streetCeps.filter((c) => c !== block.cep);
+      if (otherCeps.length === 0) continue;
 
-    if (otherCeps.length > 0) {
-      totalDuplicatedGroups++;
-    }
+      // Retrato (snapshot) das linhas originais do bloco, tiradas ANTES de
+      // qualquer inserção (a inserção desloca índices de linha abaixo dela).
+      const snapshot = [];
+      for (let r = block.startRow; r <= block.endRow; r++) {
+        const row = sheet.getRow(r);
+        const cells = [];
+        row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+          cells.push({ colNumber, value: cell.value, style: cell.style });
+        });
+        snapshot.push({ height: row.height, cells });
+      }
 
-    // Insert new cloned rows immediately below the current row (i + 1)
-    for (const targetCep of otherCeps) {
-      const color = getColorForCep(targetCep);
+      // Insere os blocos-cópia em ordem reversa de "otherCeps": como cada
+      // inserção acontece sempre logo após o bloco original (mesma
+      // posição), a última cópia inserida acaba ficando mais perto do
+      // original — inserindo de trás pra frente, a ordem final das cópias
+      // sai crescente, igual à ordem de "otherCeps".
+      const reversedTargets = [...otherCeps].reverse();
+      for (const targetCep of reversedTargets) {
+        const color = getColorForCep(targetCep);
+        totalDuplicatedGroups++;
+        totalCopiedRows += snapshot.length;
 
-      sheet.spliceRows(i + 1, 0, []); 
-      const newRow = sheet.getRow(i + 1);
-      totalCopiedRows++;
+        // Insere N linhas em branco de uma vez, logo após o bloco original
+        sheet.spliceRows(block.endRow + 1, 0, ...snapshot.map(() => []));
 
-      row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-        const targetCell = newRow.getCell(colNumber);
-        targetCell.value = cell.value; 
-        targetCell.style = cell.style; 
-      });
-
-      newRow.height = row.height;
-      newRow.getCell(idxCep).value = targetCep;
-
-      newRow.eachCell({ includeEmpty: true }, (cell) => {
-        const currentStyle = cell.style || {};
-        cell.style = {
-          ...currentStyle,
-          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: color } }
-        };
-      });
+        snapshot.forEach((snapRow, k) => {
+          const newRow = sheet.getRow(block.endRow + 1 + k);
+          newRow.height = snapRow.height;
+          for (const c of snapRow.cells) {
+            const targetCell = newRow.getCell(c.colNumber);
+            targetCell.value = c.value;
+            targetCell.style = c.style;
+          }
+          newRow.getCell(idxCep).value = targetCep;
+          newRow.eachCell({ includeEmpty: true }, (cell) => {
+            const currentStyle = cell.style || {};
+            cell.style = {
+              ...currentStyle,
+              fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: color } }
+            };
+          });
+        });
+      }
     }
   }
 
@@ -233,11 +337,14 @@ async function handleFile(file) {
         
     const streetColName = document.getElementById('colNameInput').value.trim() || 'nome trecho';
     const finalColName = document.getElementById('colFinalInput').value.trim() || 'final';
+    const groupModeInput = document.querySelector('input[name="groupMode"]:checked');
+    const groupByBlock = (groupModeInput ? groupModeInput.value : 'intercalado') === 'bloco';
 
     const { blob, summary } = await processStreetsExcel(file, {
       outputFileName: `${baseName}_processado.xlsx`,
       streetColumnName: streetColName,
-      finalColumnName: finalColName
+      finalColumnName: finalColName,
+      groupByBlock
     });
 
     document.getElementById('statRuas').textContent = summary.totalStreets;
