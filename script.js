@@ -33,7 +33,7 @@ function generateRandomColor() {
 }
 
 async function processStreetsExcel(file, options = {}) {
-  if (!file) throw new Error('Nenhum arquivo foi fornecido.'); // Keeping UI messages in PT-BR
+  if (!file) throw new Error('Nenhum arquivo foi fornecido.');
   if (typeof ExcelJS === 'undefined') {
     throw new Error('Não foi possível carregar a biblioteca ExcelJS (verifique sua conexão).');
   }
@@ -42,6 +42,7 @@ async function processStreetsExcel(file, options = {}) {
 
   const buffer = await file.arrayBuffer();
   const workbook = new ExcelJS.Workbook();
+  // Load the workbook directly to preserve all formatting, formulas, and structures
   await workbook.xlsx.load(buffer);
 
   const sheet = options.sheetName ? workbook.getWorksheet(options.sheetName) : workbook.worksheets[0];
@@ -52,6 +53,7 @@ async function processStreetsExcel(file, options = {}) {
   headerRow.eachCell({ includeEmpty: false }, (cell, colNumber) => {
     columns.push({ index: colNumber, name: String(cell.value ?? '').trim() });
   });
+
   if (columns.length === 0) {
     throw new Error('Não encontrei uma linha de cabeçalho na primeira linha da planilha.');
   }
@@ -59,110 +61,113 @@ async function processStreetsExcel(file, options = {}) {
   const findColumn = (target) => {
     const col = columns.find((c) => normalizeText(c.name) === normalizeText(target));
     if (!col) {
-      throw new Error(
-        `Não encontrei a coluna "${target}" no arquivo. Verifique se o cabeçalho da planilha tem uma coluna com esse nome (maiúsculas/minúsculas não importam).`
-      );
+      throw new Error(`Não encontrei a coluna "${target}" no arquivo.`);
     }
     return col.index;
   };
 
   const idxStreetName = findColumn('nome trecho');
   const idxCep = findColumn('cep');
+  
+  // Find the 'final' column safely
   const finalColumn = columns.find((c) => normalizeText(c.name) === 'final');
   const idxFinal = finalColumn ? finalColumn.index : null;
-  const totalColumns = columns.reduce((max, c) => Math.max(max, c.index), 0);
 
-  const rows = [];
+  // Pass 1: Map all unique CEPs for each street name
+  const cepsByStreet = new Map();
+  const allCeps = new Set();
+  let totalOriginalRows = 0;
+
   sheet.eachRow((row, rowNumber) => {
     if (rowNumber === 1) return;
-    const values = [];
-    for (let c = 1; c <= totalColumns; c++) values.push(row.getCell(c).value ?? null);
-    rows.push(values);
-  });
-  if (rows.length === 0) throw new Error('A planilha não tem nenhuma linha de dados abaixo do cabeçalho.');
+    totalOriginalRows++;
 
-  if (idxFinal) {
-    for (const values of rows) {
-      const v = values[idxFinal - 1];
-      if (v === null || v === undefined || String(v).trim() === '') values[idxFinal - 1] = 99999;
+    // Extract value safely (handling ExcelJS formula objects if they exist)
+    const streetVal = row.getCell(idxStreetName).value;
+    const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
+
+    const cepVal = row.getCell(idxCep).value;
+    const cep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
+
+    if (!cepsByStreet.has(streetName)) {
+      cepsByStreet.set(streetName, new Set());
     }
-  }
-
-  rows.sort((a, b) => {
-    const nameA = normalizeText(a[idxStreetName - 1]);
-    const nameB = normalizeText(b[idxStreetName - 1]);
-    if (nameA !== nameB) return nameA < nameB ? -1 : 1;
-    const cepA = String(a[idxCep - 1] ?? '');
-    const cepB = String(b[idxCep - 1] ?? '');
-    return cepA.localeCompare(cepB, 'pt-BR', { numeric: true });
+    cepsByStreet.get(streetName).add(cep);
+    allCeps.add(cep);
   });
 
-  const cepsByStreet = new Map();
-  for (const values of rows) {
-    const key = normalizeText(values[idxStreetName - 1]);
-    const cep = String(values[idxCep - 1] ?? '').trim();
-    if (!cepsByStreet.has(key)) cepsByStreet.set(key, []);
-    const list = cepsByStreet.get(key);
-    if (!list.includes(cep)) list.push(cep);
+  let totalStreetsWithMultipleCeps = 0;
+  for (const ceps of cepsByStreet.values()) {
+    if (ceps.size > 1) totalStreetsWithMultipleCeps++;
   }
 
-  const blocks = [];
-  let currentBlock = null;
-  for (const values of rows) {
-    const streetKey = normalizeText(values[idxStreetName - 1]);
-    const cep = String(values[idxCep - 1] ?? '').trim();
-    if (currentBlock && currentBlock.streetKey === streetKey && currentBlock.cep === cep) {
-      currentBlock.rows.push(values);
-    } else {
-      currentBlock = { streetKey, cep, rows: [values] };
-      blocks.push(currentBlock);
-    }
-  }
-
-  const finalRows = [];
   let totalDuplicatedGroups = 0;
   let totalCopiedRows = 0;
-  let totalStreetsWithMultipleCeps = 0;
-  for (const ceps of cepsByStreet.values()) if (ceps.length > 1) totalStreetsWithMultipleCeps++;
-  const allCeps = new Set(rows.map((v) => String(v[idxCep - 1] ?? '').trim()));
 
-  for (const block of blocks) {
-    for (const values of block.rows) finalRows.push({ values, color: null });
-    const allBlockCeps = cepsByStreet.get(block.streetKey) || [];
-    const otherCeps = allBlockCeps.filter((c) => c !== block.cep);
-    for (const targetCep of otherCeps) {
-      const color = generateRandomColor();
-      totalDuplicatedGroups++;
-      for (const originalValues of block.rows) {
-        const copy = originalValues.slice();
-        copy[idxCep - 1] = targetCep;
-        finalRows.push({ values: copy, color });
-        totalCopiedRows++;
+  // Pass 2: Iterate backwards to insert cloned rows without breaking the index loop
+  const rowCount = sheet.rowCount;
+  
+  for (let i = rowCount; i >= 2; i--) {
+    const row = sheet.getRow(i);
+
+    // Kept feature: Insert 99999 if 'final' cell is empty
+    if (idxFinal) {
+      const finalCell = row.getCell(idxFinal);
+      const cellValue = finalCell.value && typeof finalCell.value === 'object' ? finalCell.value.result : finalCell.value;
+      
+      if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
+        finalCell.value = 99999;
       }
     }
-  }
 
-  const newWorkbook = new ExcelJS.Workbook();
-  const newSheet = newWorkbook.addWorksheet(sheet.name || 'Ruas');
-  const headerNames = [];
-  for (let c = 1; c <= totalColumns; c++) {
-    const col = columns.find((cc) => cc.index === c);
-    headerNames.push(col ? col.name : '');
-  }
-  newSheet.addRow(headerNames);
-  newSheet.getRow(1).font = { bold: true };
+    const streetVal = row.getCell(idxStreetName).value;
+    const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
 
-  for (const { values, color } of finalRows) {
-    const row = newSheet.addRow(values);
-    if (color) {
-      row.eachCell({ includeEmpty: true }, (cell) => {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: color } };
+    const cepVal = row.getCell(idxCep).value;
+    const currentCep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
+
+    const streetCeps = Array.from(cepsByStreet.get(streetName) || []);
+    const otherCeps = streetCeps.filter(c => c !== currentCep);
+
+    if (otherCeps.length > 0) {
+      totalDuplicatedGroups++;
+    }
+
+    // Insert new cloned rows immediately below the current row (i + 1)
+    for (const targetCep of otherCeps) {
+      const color = generateRandomColor();
+
+      // Splice inserts a blank row and pushes everything else down
+      sheet.spliceRows(i + 1, 0, []); 
+      const newRow = sheet.getRow(i + 1);
+      totalCopiedRows++;
+
+      // Copy values (including formulas) and styles from the original row
+      row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+        const targetCell = newRow.getCell(colNumber);
+        targetCell.value = cell.value; 
+        targetCell.style = cell.style; 
+      });
+
+      // Match row height
+      newRow.height = row.height;
+
+      // Kept feature: Purposeful modification of the cloned row's CEP
+      newRow.getCell(idxCep).value = targetCep;
+
+      // Apply highlighting color to the cloned row, merging with existing styles
+      newRow.eachCell({ includeEmpty: true }, (cell) => {
+        const currentStyle = cell.style || {};
+        cell.style = {
+          ...currentStyle,
+          fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: color } }
+        };
       });
     }
   }
-  newSheet.columns.forEach((col) => { col.width = 18; });
 
-  const outputArrayBuffer = await newWorkbook.xlsx.writeBuffer();
+  // Write directly from the mutated original workbook
+  const outputArrayBuffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([outputArrayBuffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
@@ -171,13 +176,13 @@ async function processStreetsExcel(file, options = {}) {
     blob,
     fileName: outputFileName,
     summary: {
-      totalOriginalRows: rows.length,
+      totalOriginalRows,
       totalStreets: cepsByStreet.size,
       totalDistinctCeps: allCeps.size,
       totalStreetsWithMultipleCeps,
       totalDuplicatedGroups,
       totalCopiedRows,
-      totalOutputRows: finalRows.length,
+      totalOutputRows: totalOriginalRows + totalCopiedRows,
     },
   };
 }
