@@ -1,6 +1,3 @@
-// ---------------------------------------------------------------------
-// Processing logic
-// ---------------------------------------------------------------------
 function normalizeText(text) {
   return String(text ?? '')
     .normalize('NFD')
@@ -39,10 +36,11 @@ async function processStreetsExcel(file, options = {}) {
   }
 
   const outputFileName = options.outputFileName || 'ruas_processado.xlsx';
+  const targetStreetColumn = options.streetColumnName || 'nome trecho';
+  const targetFinalColumn = options.finalColumnName || 'final';
 
   const buffer = await file.arrayBuffer();
   const workbook = new ExcelJS.Workbook();
-  // Load the workbook directly to preserve all formatting, formulas, and structures
   await workbook.xlsx.load(buffer);
 
   const sheet = options.sheetName ? workbook.getWorksheet(options.sheetName) : workbook.worksheets[0];
@@ -66,12 +64,16 @@ async function processStreetsExcel(file, options = {}) {
     return col.index;
   };
 
-  const idxStreetName = findColumn('nome trecho');
+  const idxStreetName = findColumn(targetStreetColumn);
   const idxCep = findColumn('cep');
   
-  // Find the 'final' column safely
-  const finalColumn = columns.find((c) => normalizeText(c.name) === 'final');
-  const idxFinal = finalColumn ? finalColumn.index : null;
+  // Find the custom 'final' column safely (optional, won't throw if not found)
+  let idxFinal = null;
+  try {
+    idxFinal = findColumn(targetFinalColumn);
+  } catch (e) {
+    idxFinal = null; 
+  }
 
   // Pass 1: Map all unique CEPs for each street name
   const cepsByStreet = new Map();
@@ -82,7 +84,6 @@ async function processStreetsExcel(file, options = {}) {
     if (rowNumber === 1) return;
     totalOriginalRows++;
 
-    // Extract value safely (handling ExcelJS formula objects if they exist)
     const streetVal = row.getCell(idxStreetName).value;
     const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
 
@@ -100,17 +101,23 @@ async function processStreetsExcel(file, options = {}) {
   for (const ceps of cepsByStreet.values()) {
     if (ceps.size > 1) totalStreetsWithMultipleCeps++;
   }
+  
+  const cepColors = new Map();
+  const getColorForCep = (cep) => {
+    if (!cepColors.has(cep)) {
+      cepColors.set(cep, generateRandomColor());
+    }
+    return cepColors.get(cep);
+  };
 
   let totalDuplicatedGroups = 0;
   let totalCopiedRows = 0;
-
-  // Pass 2: Iterate backwards to insert cloned rows without breaking the index loop
+  
   const rowCount = sheet.rowCount;
   
   for (let i = rowCount; i >= 2; i--) {
     const row = sheet.getRow(i);
-
-    // Kept feature: Insert 99999 if 'final' cell is empty
+    
     if (idxFinal) {
       const finalCell = row.getCell(idxFinal);
       const cellValue = finalCell.value && typeof finalCell.value === 'object' ? finalCell.value.result : finalCell.value;
@@ -135,27 +142,21 @@ async function processStreetsExcel(file, options = {}) {
 
     // Insert new cloned rows immediately below the current row (i + 1)
     for (const targetCep of otherCeps) {
-      const color = generateRandomColor();
+      const color = getColorForCep(targetCep);
 
-      // Splice inserts a blank row and pushes everything else down
       sheet.spliceRows(i + 1, 0, []); 
       const newRow = sheet.getRow(i + 1);
       totalCopiedRows++;
 
-      // Copy values (including formulas) and styles from the original row
       row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
         const targetCell = newRow.getCell(colNumber);
         targetCell.value = cell.value; 
         targetCell.style = cell.style; 
       });
 
-      // Match row height
       newRow.height = row.height;
-
-      // Kept feature: Purposeful modification of the cloned row's CEP
       newRow.getCell(idxCep).value = targetCep;
 
-      // Apply highlighting color to the cloned row, merging with existing styles
       newRow.eachCell({ includeEmpty: true }, (cell) => {
         const currentStyle = cell.style || {};
         cell.style = {
@@ -166,7 +167,6 @@ async function processStreetsExcel(file, options = {}) {
     }
   }
 
-  // Write directly from the mutated original workbook
   const outputArrayBuffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([outputArrayBuffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -187,9 +187,9 @@ async function processStreetsExcel(file, options = {}) {
   };
 }
 
-// ---------------------------------------------------------------------
+// =====================================================================
 // UI Logic
-// ---------------------------------------------------------------------
+// =====================================================================
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const fileNameEl = document.getElementById('fileName');
@@ -230,8 +230,14 @@ async function handleFile(file) {
 
   try {
     const baseName = file.name.replace(/\.xlsx$/i, '');
+        
+    const streetColName = document.getElementById('colNameInput').value.trim() || 'nome trecho';
+    const finalColName = document.getElementById('colFinalInput').value.trim() || 'final';
+
     const { blob, summary } = await processStreetsExcel(file, {
       outputFileName: `${baseName}_processado.xlsx`,
+      streetColumnName: streetColName,
+      finalColumnName: finalColName
     });
 
     document.getElementById('statRuas').textContent = summary.totalStreets;
