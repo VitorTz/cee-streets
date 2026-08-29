@@ -58,14 +58,14 @@ async function processStreetsExcel(file, options = {}) {
   const sheet = options.sheetName ? workbook.getWorksheet(options.sheetName) : workbook.worksheets[0];
   if (!sheet) throw new Error('Não encontrei nenhuma planilha dentro do arquivo.');
 
-  const headerRow = sheet.getRow(1);
+  const headerRow = sheet.getRow(1 + skipRows);
   const columns = [];
   headerRow.eachCell({ includeEmpty: false }, (cell, colNumber) => {
     columns.push({ index: colNumber, name: String(cell.value ?? '').trim() });
   });
 
   if (columns.length === 0) {
-    throw new Error('Não encontrei uma linha de cabeçalho na primeira linha da planilha.');
+    throw new Error(`Não encontrei uma linha de cabeçalho na linha ${1 + skipRows} da planilha (a primeira linha depois das ${skipRows} ignoradas).`);
   }
 
   const findColumn = (target) => {
@@ -100,10 +100,12 @@ async function processStreetsExcel(file, options = {}) {
 
   const rowCount = sheet.rowCount;
 
-  // Linha 1 é o cabeçalho; as próximas `skipRows` linhas são ignoradas por
-  // completo (não entram em nenhum cálculo, não são recoloridas, e o valor
-  // de "final" delas nunca é tocado) — mas continuam no arquivo final,
-  // exatamente como estavam, porque simplesmente nunca as lemos/escrevemos.
+  // As `skipRows` primeiras linhas são ignoradas por completo — nem viram
+  // cabeçalho, nem dado (não entram em nenhum cálculo, não são
+  // recoloridas, e não são tocadas de forma alguma) — mas continuam no
+  // arquivo final, exatamente como estavam. O cabeçalho de verdade é a
+  // primeira linha logo depois delas (linha `1 + skipRows`), e os dados
+  // começam na linha seguinte a essa.
   const dataStartRow = 2 + skipRows;
   if (dataStartRow > rowCount + 1) {
     throw new Error(

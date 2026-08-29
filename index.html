@@ -29,9 +29,9 @@
       <input type="text" id="colFinalInput" class="text-input" value="final" placeholder="Ex: final" />
     </div>
     <div class="input-group">
-      <label for="skipRowsInput" class="input-label">Linhas a ignorar no início:</label>
+      <label for="skipRowsInput" class="input-label">Linhas a ignorar no início (antes do cabeçalho):</label>
       <input type="number" id="skipRowsInput" class="text-input" value="0" min="0" step="1" />
-      <span class="radio-hint">Essas linhas continuam no arquivo final, mas não são processadas.</span>
+      <span class="radio-hint">Essas linhas continuam no arquivo final, mas não são processadas. O cabeçalho da tabela deve vir logo depois delas.</span>
     </div>
     <input type="file" id="fileInput" accept=".xlsx" hidden />
     <section id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Selecionar arquivo Excel">
