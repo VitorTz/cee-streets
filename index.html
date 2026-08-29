@@ -25,6 +25,15 @@
       <input type="text" id="colFinalInput" class="text-input" value="final" placeholder="Ex: final" />
     </div>
     <div class="input-group">
+      <label for="colOrderInput" class="input-label">Nome da coluna de ordem:</label>
+      <input type="text" id="colOrderInput" class="text-input" value="ordem" placeholder="Ex: ordem" />
+    </div>
+    <div class="input-group">
+      <label for="skipRowsInput" class="input-label">Linhas a ignorar no início (logo após o cabeçalho):</label>
+      <input type="number" id="skipRowsInput" class="text-input" value="0" min="0" step="1" />
+      <span class="radio-hint">Essas linhas continuam no arquivo final, mas não são processadas.</span>
+    </div>
+    <div class="input-group">
       <span class="input-label">Formato das cópias:</span>
       <div class="radio-group" role="radiogroup" aria-label="Formato das cópias">
         <label class="radio-option">

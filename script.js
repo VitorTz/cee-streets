@@ -29,6 +29,14 @@ function generateRandomColor() {
   return hslToArgbHex(h, s, l);
 }
 
+// Lê o valor "de verdade" de uma célula, mesmo quando ela vem de uma fórmula
+// (nesse caso o ExcelJS retorna um objeto { formula, result, ... } em vez do
+// valor puro).
+function getPlainValue(cell) {
+  const v = cell.value;
+  return v && typeof v === 'object' ? v.result : v;
+}
+
 async function processStreetsExcel(file, options = {}) {
   if (!file) throw new Error('Nenhum arquivo foi fornecido.');
   if (typeof ExcelJS === 'undefined') {
@@ -38,7 +46,11 @@ async function processStreetsExcel(file, options = {}) {
   const outputFileName = options.outputFileName || 'ruas_processado.xlsx';
   const targetStreetColumn = options.streetColumnName || 'nome trecho';
   const targetFinalColumn = options.finalColumnName || 'final';
+  const targetOrderColumn = options.orderColumnName || 'ordem';
   const groupByBlock = options.groupByBlock === true;
+
+  let skipRows = parseInt(options.skipRows, 10);
+  if (!Number.isFinite(skipRows) || skipRows < 0) skipRows = 0;
 
   const buffer = await file.arrayBuffer();
   const workbook = new ExcelJS.Workbook();
@@ -76,13 +88,43 @@ async function processStreetsExcel(file, options = {}) {
     idxFinal = null; 
   }
 
+  // Find the custom 'ordem' column safely (optional, won't throw if not found).
+  // Sem ela, a regra "última ordem do último cep da rua" não tem como ser
+  // calculada, então ela simplesmente não é aplicada (o preenchimento de
+  // "final" vazio continua funcionando normalmente).
+  let idxOrdem = null;
+  try {
+    idxOrdem = findColumn(targetOrderColumn);
+  } catch (e) {
+    idxOrdem = null;
+  }
+
+  const rowCount = sheet.rowCount;
+
+  // Linha 1 é o cabeçalho; as próximas `skipRows` linhas são ignoradas por
+  // completo (não entram em nenhum cálculo, não são recoloridas, e o valor
+  // de "final" delas nunca é tocado) — mas continuam no arquivo final,
+  // exatamente como estavam, porque simplesmente nunca as lemos/escrevemos.
+  const dataStartRow = 2 + skipRows;
+  if (dataStartRow > rowCount + 1) {
+    throw new Error(
+      `O número de linhas a ignorar (${skipRows}) é maior do que a quantidade de linhas de dados da planilha (${Math.max(rowCount - 1, 0)}).`
+    );
+  }
+
   // Pass 1: Map all unique CEPs for each street name
   const cepsByStreet = new Map();
   const allCeps = new Set();
   let totalOriginalRows = 0;
 
+  // Para cada rua, guarda o maior valor de "ordem" já visto e o(s)
+  // número(s) de linha que atingem esse máximo — é isso que define "a
+  // última ordem do último cep da rua" (o maior ordem da rua inteira,
+  // somando todos os ceps dela).
+  const lastOrdemByStreet = new Map(); // streetName -> { maxOrdem, rows: Set<rowNumber> }
+
   sheet.eachRow((row, rowNumber) => {
-    if (rowNumber === 1) return;
+    if (rowNumber < dataStartRow) return; // linha de cabeçalho ou ignorada
     totalOriginalRows++;
 
     const streetVal = row.getCell(idxStreetName).value;
@@ -96,7 +138,27 @@ async function processStreetsExcel(file, options = {}) {
     }
     cepsByStreet.get(streetName).add(cep);
     allCeps.add(cep);
+
+    if (idxOrdem) {
+      const ordemNum = Number(getPlainValue(row.getCell(idxOrdem)));
+      if (Number.isFinite(ordemNum)) {
+        const atual = lastOrdemByStreet.get(streetName);
+        if (!atual || ordemNum > atual.maxOrdem) {
+          lastOrdemByStreet.set(streetName, { maxOrdem: ordemNum, rows: new Set([rowNumber]) });
+        } else if (ordemNum === atual.maxOrdem) {
+          atual.rows.add(rowNumber);
+        }
+      }
+    }
   });
+
+  // Conjunto plano com o número de TODAS as linhas que representam "a
+  // última ordem do último cep" de alguma rua — usado nas Passes 2 pra
+  // decidir quando forçar o "final" para 99999 mesmo que já tenha valor.
+  const forcedFinalRows = new Set();
+  for (const { rows } of lastOrdemByStreet.values()) {
+    for (const r of rows) forcedFinalRows.add(r);
+  }
 
   let totalStreetsWithMultipleCeps = 0;
   for (const ceps of cepsByStreet.values()) {
@@ -113,23 +175,26 @@ async function processStreetsExcel(file, options = {}) {
 
   let totalDuplicatedGroups = 0;
   let totalCopiedRows = 0;
-  
-  const rowCount = sheet.rowCount;
 
   if (!groupByBlock) {
     // ---------------------------------------------------------------------
     // Modo intercalado (padrão): para cada linha original, insere as
     // cópias dela imediatamente abaixo dela mesma.
     // ---------------------------------------------------------------------
-    for (let i = rowCount; i >= 2; i--) {
+    for (let i = rowCount; i >= dataStartRow; i--) {
       const row = sheet.getRow(i);
       
       if (idxFinal) {
         const finalCell = row.getCell(idxFinal);
-        const cellValue = finalCell.value && typeof finalCell.value === 'object' ? finalCell.value.result : finalCell.value;
-        
-        if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
+        if (forcedFinalRows.has(i)) {
+          // Última ordem do último cep da rua: força 99999, mesmo que já
+          // tenha um valor.
           finalCell.value = 99999;
+        } else {
+          const cellValue = getPlainValue(finalCell);
+          if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
+            finalCell.value = 99999;
+          }
         }
       }
 
@@ -187,7 +252,7 @@ async function processStreetsExcel(file, options = {}) {
     // ---------------------------------------------------------------------
     const blocks = [];
     let currentBlock = null;
-    for (let i = 2; i <= rowCount; i++) {
+    for (let i = dataStartRow; i <= rowCount; i++) {
       const row = sheet.getRow(i);
       const streetVal = row.getCell(idxStreetName).value;
       const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
@@ -208,14 +273,19 @@ async function processStreetsExcel(file, options = {}) {
     for (let b = blocks.length - 1; b >= 0; b--) {
       const block = blocks[b];
 
-      // Regra do "final vazio -> 99999", aplicada às linhas originais do
-      // bloco antes de tirarmos o retrato (snapshot) delas.
+      // Regra do "final": força 99999 na última ordem do último cep da rua
+      // (mesmo que já tenha valor); nas demais linhas, só preenche se
+      // estiver vazio — igual ao modo intercalado.
       if (idxFinal) {
         for (let r = block.startRow; r <= block.endRow; r++) {
           const finalCell = sheet.getRow(r).getCell(idxFinal);
-          const cellValue = finalCell.value && typeof finalCell.value === 'object' ? finalCell.value.result : finalCell.value;
-          if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
+          if (forcedFinalRows.has(r)) {
             finalCell.value = 99999;
+          } else {
+            const cellValue = getPlainValue(finalCell);
+            if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
+              finalCell.value = 99999;
+            }
           }
         }
       }
@@ -281,12 +351,13 @@ async function processStreetsExcel(file, options = {}) {
     fileName: outputFileName,
     summary: {
       totalOriginalRows,
+      skippedRows: skipRows,
       totalStreets: cepsByStreet.size,
       totalDistinctCeps: allCeps.size,
       totalStreetsWithMultipleCeps,
       totalDuplicatedGroups,
       totalCopiedRows,
-      totalOutputRows: totalOriginalRows + totalCopiedRows,
+      totalOutputRows: totalOriginalRows + skipRows + totalCopiedRows,
     },
   };
 }
@@ -337,6 +408,8 @@ async function handleFile(file) {
         
     const streetColName = document.getElementById('colNameInput').value.trim() || 'nome trecho';
     const finalColName = document.getElementById('colFinalInput').value.trim() || 'final';
+    const orderColName = document.getElementById('colOrderInput').value.trim() || 'ordem';
+    const skipRows = document.getElementById('skipRowsInput').value.trim() || '0';
     const groupModeInput = document.querySelector('input[name="groupMode"]:checked');
     const groupByBlock = (groupModeInput ? groupModeInput.value : 'intercalado') === 'bloco';
 
@@ -344,6 +417,8 @@ async function handleFile(file) {
       outputFileName: `${baseName}_processado.xlsx`,
       streetColumnName: streetColName,
       finalColumnName: finalColName,
+      orderColumnName: orderColName,
+      skipRows,
       groupByBlock
     });
 
