@@ -47,7 +47,6 @@ async function processStreetsExcel(file, options = {}) {
   const targetStreetColumn = options.streetColumnName || 'nome trecho';
   const targetFinalColumn = options.finalColumnName || 'final';
   const targetOrderColumn = options.orderColumnName || 'ordem';
-  const groupByBlock = options.groupByBlock === true;
 
   let skipRows = parseInt(options.skipRows, 10);
   if (!Number.isFinite(skipRows) || skipRows < 0) skipRows = 0;
@@ -180,83 +179,17 @@ async function processStreetsExcel(file, options = {}) {
   let totalDuplicatedGroups = 0;
   let totalCopiedRows = 0;
 
-  if (!groupByBlock) {
+  {
     // ---------------------------------------------------------------------
-    // Modo intercalado (padrão): para cada linha original, insere as
-    // cópias dela imediatamente abaixo dela mesma.
-    // ---------------------------------------------------------------------
-    for (let i = rowCount; i >= dataStartRow; i--) {
-      const row = sheet.getRow(i);
-      
-      if (idxFinal) {
-        const finalCell = row.getCell(idxFinal);
-        if (forcedFinalRows.has(i)) {
-          // Última ordem do último cep da rua: força 99999, mesmo que já
-          // tenha um valor.
-          finalCell.value = 99999;
-        } else {
-          const cellValue = getPlainValue(finalCell);
-          if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
-            finalCell.value = 99999;
-          }
-        }
-      }
-
-      const streetVal = row.getCell(idxStreetName).value;
-      const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
-
-      const cepVal = row.getCell(idxCep).value;
-      const currentCep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
-      
-      if (!streetName || !currentCep) {
-        continue;
-      }
-
-      const streetCeps = Array.from(cepsByStreet.get(streetName) || []);
-      const otherCeps = streetCeps.filter(c => c !== currentCep);
-
-      if (otherCeps.length > 0) {
-        totalDuplicatedGroups++;
-      }
-
-      // Insert new cloned rows immediately below the current row (i + 1)
-      for (const targetCep of otherCeps) {
-        const color = getColorForCep(targetCep);
-
-        sheet.spliceRows(i + 1, 0, []); 
-        const newRow = sheet.getRow(i + 1);
-        totalCopiedRows++;
-
-        row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-          const targetCell = newRow.getCell(colNumber);
-          targetCell.value = cell.value; 
-          targetCell.style = cell.style; 
-        });
-
-        newRow.height = row.height;
-        newRow.getCell(idxCep).value = targetCep;
-
-        newRow.eachCell({ includeEmpty: true }, (cell) => {
-          const currentStyle = cell.style || {};
-          cell.style = {
-            ...currentStyle,
-            fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: color } }
-          };
-        });
-      }
-    }
-  } else {
-    // ---------------------------------------------------------------------
-    // Modo agrupado por bloco: primeiro identifica blocos contíguos
-    // (mesma rua + mesmo cep, linhas em sequência), depois insere cada
-    // cópia como um bloco inteiro logo abaixo do bloco original — em vez
-    // de intercalar linha a linha.
+    // Agrupa por bloco: primeiro identifica blocos contíguos (mesma rua +
+    // mesmo cep, linhas em sequência), depois insere cada cópia como um
+    // bloco inteiro logo abaixo do bloco original.
     //
     // Não fazemos um sort global antes disso (pra preservar a formatação
-    // e a ordem original do arquivo, como já era feito no modo
-    // intercalado) — os blocos são detectados na ordem física em que já
-    // aparecem na planilha. Se o arquivo não tiver as linhas de cada
-    // rua+cep já em sequência, blocos "quebrados" viram blocos separados.
+    // e a ordem original do arquivo) — os blocos são detectados na ordem
+    // física em que já aparecem na planilha. Se o arquivo não tiver as
+    // linhas de cada rua+cep já em sequência, blocos "quebrados" viram
+    // blocos separados.
     // ---------------------------------------------------------------------
     const blocks = [];
     let currentBlock = null;
@@ -422,16 +355,13 @@ async function handleFile(file) {
     const finalColName = document.getElementById('colFinalInput').value.trim() || 'final';
     const orderColName = document.getElementById('colOrderInput').value.trim() || 'ordem';
     const skipRows = document.getElementById('skipRowsInput').value.trim() || '0';
-    const groupModeInput = document.querySelector('input[name="groupMode"]:checked');
-    const groupByBlock = (groupModeInput ? groupModeInput.value : 'intercalado') === 'bloco';
 
     const { blob, summary } = await processStreetsExcel(file, {
       outputFileName: `${baseName}_processado.xlsx`,
       streetColumnName: streetColName,
       finalColumnName: finalColName,
       orderColumnName: orderColName,
-      skipRows,
-      groupByBlock
+      skipRows
     });
 
     document.getElementById('statRuas').textContent = summary.totalStreets;
