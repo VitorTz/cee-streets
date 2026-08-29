@@ -37,6 +37,14 @@ function getPlainValue(cell) {
   return v && typeof v === 'object' ? v.result : v;
 }
 
+// Devolve o controle pro navegador por um instante. Sem isso, o loop de
+// processamento (que é síncrono) trava a repintura da tela até acabar tudo
+// — a barra de progresso "pularia" de 0% pra 100% de uma vez só, em vez de
+// se mover de verdade.
+function nextTick() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 async function processStreetsExcel(file, options = {}) {
   if (!file) throw new Error('Nenhum arquivo foi fornecido.');
   if (typeof ExcelJS === 'undefined') {
@@ -198,6 +206,7 @@ async function processStreetsExcel(file, options = {}) {
     for (let i = dataStartRow; i <= rowCount; i++) {
       const row = sheet.getRow(i);
       const streetVal = row.getCell(idxStreetName).value;
+      const streetNameRaw = String(getPlainValue(row.getCell(idxStreetName)) ?? '').trim();
       const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
       const cepVal = row.getCell(idxCep).value;
       const cep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
@@ -209,7 +218,7 @@ async function processStreetsExcel(file, options = {}) {
       if (currentBlock && currentBlock.streetName === streetName && currentBlock.cep === cep) {
         currentBlock.endRow = i;
       } else {
-        currentBlock = { startRow: i, endRow: i, streetName, cep };
+        currentBlock = { startRow: i, endRow: i, streetName, streetNameRaw, cep };
         blocks.push(currentBlock);
       }
     }
@@ -217,6 +226,14 @@ async function processStreetsExcel(file, options = {}) {
     // Processa os blocos de baixo para cima: como cada bloco insere linhas
     // sempre abaixo do seu próprio fim original, isso nunca desloca os
     // índices dos blocos que ainda faltam processar (que estão acima).
+    const totalBlocks = blocks.length;
+    let blocosProcessados = 0;
+    let ultimoRespiro = Date.now();
+
+    if (typeof options.onProgress === 'function') {
+      options.onProgress({ current: 0, total: totalBlocks, streetName: null });
+    }
+
     for (let b = blocks.length - 1; b >= 0; b--) {
       const block = blocks[b];
 
@@ -235,6 +252,22 @@ async function processStreetsExcel(file, options = {}) {
             }
           }
         }
+      }
+
+      blocosProcessados++;
+      if (typeof options.onProgress === 'function') {
+        options.onProgress({
+          current: blocosProcessados,
+          total: totalBlocks,
+          streetName: block.streetNameRaw || block.streetName,
+        });
+      }
+      // Só cede o controle ao navegador de vez em quando (no máximo a cada
+      // 100ms de trabalho contínuo) — ceder a cada bloco individualmente
+      // deixaria o processamento bem mais lento em planilhas grandes.
+      if (Date.now() - ultimoRespiro > 100) {
+        await nextTick();
+        ultimoRespiro = Date.now();
       }
 
       const streetCeps = Array.from(cepsByStreet.get(block.streetName) || []);
@@ -288,6 +321,54 @@ async function processStreetsExcel(file, options = {}) {
     }
   }
 
+  // Ordenação final (opcional): reordena TODA a região processada (da
+  // primeira linha de dados até a última linha do arquivo, já incluindo as
+  // cópias inseridas) por CEP crescente e, em caso de empate, por "ordem"
+  // crescente. As linhas ignoradas (`skipRows`) e o cabeçalho ficam de
+  // fora — nunca são tocadas nem se movem.
+  //
+  // Como não dá pra simplesmente "mover" linhas no ExcelJS, tiramos um
+  // retrato de cada linha da região (valores + estilo, igual já fazemos
+  // pra duplicar blocos), ordenamos esse retrato em memória, e
+  // reescrevemos cada linha física na nova ordem — cor e formatação vêm
+  // junto porque fazem parte do retrato.
+  if (options.sortOutput === true) {
+    const finalRowCount = sheet.rowCount;
+    const registros = [];
+    for (let r = dataStartRow; r <= finalRowCount; r++) {
+      const row = sheet.getRow(r);
+      const cells = [];
+      row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+        cells.push({ colNumber, value: cell.value, style: cell.style });
+      });
+      const cepValor = String(getPlainValue(row.getCell(idxCep)) ?? '').trim();
+      const ordemValor = idxOrdem ? Number(getPlainValue(row.getCell(idxOrdem))) : NaN;
+      registros.push({ height: row.height, cells, cepValor, ordemValor });
+    }
+
+    // Array.prototype.sort é estável (garantido desde ES2019): quando o
+    // comparador devolve 0 (ex.: sem coluna "ordem" pra desempatar), a
+    // ordem relativa original é preservada em vez de virar aleatória.
+    registros.sort((a, b) => {
+      const porCep = a.cepValor.localeCompare(b.cepValor, 'pt-BR', { numeric: true });
+      if (porCep !== 0) return porCep;
+      if (Number.isFinite(a.ordemValor) && Number.isFinite(b.ordemValor)) {
+        return a.ordemValor - b.ordemValor;
+      }
+      return 0;
+    });
+
+    registros.forEach((registro, idx) => {
+      const row = sheet.getRow(dataStartRow + idx);
+      row.height = registro.height;
+      for (const c of registro.cells) {
+        const targetCell = row.getCell(c.colNumber);
+        targetCell.value = c.value;
+        targetCell.style = c.style;
+      }
+    });
+  }
+
   const outputArrayBuffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([outputArrayBuffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -317,21 +398,40 @@ const fileInput = document.getElementById('fileInput');
 const fileNameEl = document.getElementById('fileName');
 const statusEl = document.getElementById('status');
 const statusTextEl = document.getElementById('statusText');
+const progressTrackEl = document.getElementById('progressTrack');
+const progressFillEl = document.getElementById('progressFill');
+const progressDetailEl = document.getElementById('progressDetail');
 const errorBox = document.getElementById('errorBox');
 const results = document.getElementById('results');
 const downloadLink = document.getElementById('downloadLink');
 const resetBtn = document.getElementById('resetBtn');
 
-let currentObjectUrl = null;
+// New DOM elements for the history feature
+const historySection = document.getElementById('historySection');
+const historyList = document.getElementById('historyList');
+
+// Map to track how many times a base file name has been generated
+const fileGenerationTracker = new Map();
+
+function updateProgress({ current, total, streetName }) {
+  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+  progressFillEl.style.width = pct + '%';
+  progressTrackEl.setAttribute('aria-valuenow', String(pct));
+  progressDetailEl.textContent = streetName
+    ? `${pct}% - street ${current} of ${total}: "${streetName}"`
+    : `${pct}% - ${total} streets found`;
+}
 
 function resetUI() {
-  if (currentObjectUrl) { URL.revokeObjectURL(currentObjectUrl); currentObjectUrl = null; }
   fileInput.value = '';
   fileNameEl.hidden = true;
   statusEl.hidden = true;
   errorBox.hidden = true;
   results.hidden = true;
   dropzone.hidden = false;
+  progressFillEl.style.width = '0%';
+  progressTrackEl.setAttribute('aria-valuenow', '0');
+  progressDetailEl.textContent = '';
 }
 
 function showError(message) {
@@ -341,6 +441,15 @@ function showError(message) {
   errorBox.textContent = message;
 }
 
+function formatBytes(bytes, decimals = 2) {
+  if (!+bytes) return '0 Bytes';
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
 async function handleFile(file) {
   if (!file) return;
   errorBox.hidden = true;
@@ -348,23 +457,45 @@ async function handleFile(file) {
   fileNameEl.hidden = false;
   fileNameEl.textContent = file.name;
   statusEl.hidden = false;
-  statusTextEl.textContent = 'Processando planilha…';
+  statusTextEl.textContent = 'Processing spreadsheet...';
+  progressFillEl.style.width = '0%';
+  progressTrackEl.setAttribute('aria-valuenow', '0');
+  progressDetailEl.textContent = 'Reading file...';
 
   try {
     const baseName = file.name.replace(/\.xlsx$/i, '');
-        
+    const processedBaseName = `${baseName}_processado`;
+    
+    // Determine the versioned file name
+    const count = fileGenerationTracker.get(processedBaseName) || 0;
+    const finalDownloadName = count === 0 
+      ? `${processedBaseName}.xlsx` 
+      : `${processedBaseName}_v${count}.xlsx`;
+    
+    fileGenerationTracker.set(processedBaseName, count + 1);
+
     const streetColName = document.getElementById('colNameInput').value.trim() || 'nome trecho';
     const finalColName = document.getElementById('colFinalInput').value.trim() || 'final';
     const orderColName = document.getElementById('colOrderInput').value.trim() || 'ordem';
     const skipRows = document.getElementById('skipRowsInput').value.trim() || '0';
+    const sortOutput = document.getElementById('sortOutputInput').checked;
+
+    // Start performance timer
+    const startProcessingTime = performance.now();
 
     const { blob, summary } = await processStreetsExcel(file, {
-      outputFileName: `${baseName}_processado.xlsx`,
+      outputFileName: finalDownloadName,
       streetColumnName: streetColName,
       finalColumnName: finalColName,
       orderColumnName: orderColName,
-      skipRows
+      skipRows,
+      sortOutput,
+      onProgress: updateProgress
     });
+
+    // End performance timer and calculate duration in seconds
+    const endProcessingTime = performance.now();
+    const durationSeconds = ((endProcessingTime - startProcessingTime) / 1000).toFixed(2);
 
     document.getElementById('statRuas').textContent = summary.totalStreets;
     document.getElementById('statCeps').textContent = summary.totalDistinctCeps;
@@ -373,18 +504,109 @@ async function handleFile(file) {
     document.getElementById('statCopiadas').textContent = summary.totalCopiedRows;
     document.getElementById('statTotal').textContent = summary.totalOutputRows;
 
-    if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
-    currentObjectUrl = URL.createObjectURL(blob);
+    // Create object URL for download
+    const currentObjectUrl = URL.createObjectURL(blob);
     downloadLink.href = currentObjectUrl;
-    downloadLink.download = `${baseName}_processado.xlsx`;
+    downloadLink.download = finalDownloadName;
+    
+    // Get current time and human-readable file size
+    const creationTime = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const humanReadableSize = formatBytes(blob.size);
+    
+    // Build the history list item (<li>)
+    const historyItem = document.createElement('li');
+    
+    // Inline SVG for the Excel Icon
+   const svgIcon = `
+  <svg
+    class="history-icon"
+    viewBox="0 0 24 24"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    aria-hidden="true"
+  >
+    <!-- Excel background -->
+    <path
+      d="M5 3C5 2.45 5.45 2 6 2H14L20 8V21C20 21.55 19.55 22 19 22H6C5.45 22 5 21.55 5 21V3Z"
+      fill="#217346"
+    />
+
+    <!-- Fold -->
+    <path
+      d="M14 2V8H20"
+      fill="#185C37"
+    />
+
+    <!-- Spreadsheet -->
+    <rect
+      x="8"
+      y="10"
+      width="9"
+      height="9"
+      rx="0.8"
+      fill="white"
+      fill-opacity="0.95"
+    />
+
+    <!-- Spreadsheet grid -->
+    <path
+      d="M11 10V19
+         M14 10V19
+         M8 13H17
+         M8 16H17"
+      stroke="#217346"
+      stroke-width="1"
+    />
+
+    <!-- Excel X -->
+    <path
+      d="M3.5 7.5L7.5 11.5
+         M7.5 7.5L3.5 11.5"
+      stroke="#107C41"
+      stroke-width="2"
+      stroke-linecap="round"
+    />
+  </svg>
+`;
+    
+    // Create the anchor link for the file
+    const historyAnchor = document.createElement('a');
+    historyAnchor.href = currentObjectUrl;
+    historyAnchor.download = finalDownloadName;
+    historyAnchor.textContent = finalDownloadName;
+    historyAnchor.className = 'history-link';
+    historyAnchor.title = finalDownloadName; // Tooltip for truncated names
+    
+    // Create the metadata container (Size, Processing Time, Creation Time)
+    const metaContainer = document.createElement('div');
+    metaContainer.className = 'history-meta';
+    
+    const sizeSpan = document.createElement('span');
+    sizeSpan.textContent = humanReadableSize;
+    
+    const timeSpan = document.createElement('span');
+    timeSpan.textContent = `${creationTime}`;
+    
+    // Assemble the elements
+    metaContainer.appendChild(sizeSpan);
+    metaContainer.appendChild(timeSpan);
+    
+    historyItem.innerHTML = svgIcon;
+    historyItem.appendChild(historyAnchor);
+    historyItem.appendChild(metaContainer);
+    
+    // Prepend to show the most recent files at the top
+    historyList.prepend(historyItem);
+    historySection.hidden = false;
 
     statusEl.hidden = true;
     results.hidden = false;
   } catch (err) {
-    showError(err.message || 'Ocorreu um erro inesperado ao processar o arquivo.');
+    showError(err.message || 'An unexpected error occurred while processing the file.');
   }
 }
 
+// Event Listeners remain the same
 dropzone.addEventListener('click', () => fileInput.click());
 dropzone.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
