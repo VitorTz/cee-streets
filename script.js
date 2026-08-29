@@ -133,6 +133,10 @@ async function processStreetsExcel(file, options = {}) {
     const cepVal = row.getCell(idxCep).value;
     const cep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
 
+    if (!streetName || !cep) {
+      return;
+    }
+
     if (!cepsByStreet.has(streetName)) {
       cepsByStreet.set(streetName, new Set());
     }
@@ -203,6 +207,10 @@ async function processStreetsExcel(file, options = {}) {
 
       const cepVal = row.getCell(idxCep).value;
       const currentCep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
+      
+      if (!streetName || !currentCep) {
+        continue;
+      }
 
       const streetCeps = Array.from(cepsByStreet.get(streetName) || []);
       const otherCeps = streetCeps.filter(c => c !== currentCep);
@@ -258,6 +266,10 @@ async function processStreetsExcel(file, options = {}) {
       const streetName = normalizeText(streetVal && typeof streetVal === 'object' ? streetVal.result : streetVal);
       const cepVal = row.getCell(idxCep).value;
       const cep = String((cepVal && typeof cepVal === 'object' ? cepVal.result : cepVal) ?? '').trim();
+      
+      if (!streetName || !cep) {
+        continue;
+      }
 
       if (currentBlock && currentBlock.streetName === streetName && currentBlock.cep === cep) {
         currentBlock.endRow = i;
