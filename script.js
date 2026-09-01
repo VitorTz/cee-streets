@@ -29,18 +29,12 @@ function generateRandomColor() {
   return hslToArgbHex(h, s, l);
 }
 
-// Lê o valor "de verdade" de uma célula, mesmo quando ela vem de uma fórmula
-// (nesse caso o ExcelJS retorna um objeto { formula, result, ... } em vez do
-// valor puro).
+
 function getPlainValue(cell) {
   const v = cell.value;
   return v && typeof v === 'object' ? v.result : v;
 }
 
-// Devolve o controle pro navegador por um instante. Sem isso, o loop de
-// processamento (que é síncrono) trava a repintura da tela até acabar tudo
-// — a barra de progresso "pularia" de 0% pra 100% de uma vez só, em vez de
-// se mover de verdade.
 function nextTick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -86,19 +80,14 @@ async function processStreetsExcel(file, options = {}) {
 
   const idxStreetName = findColumn(targetStreetColumn);
   const idxCep = findColumn('cep');
-  
-  // Find the custom 'final' column safely (optional, won't throw if not found)
+    
   let idxFinal = null;
   try {
     idxFinal = findColumn(targetFinalColumn);
   } catch (e) {
     idxFinal = null; 
   }
-
-  // Find the custom 'ordem' column safely (optional, won't throw if not found).
-  // Sem ela, a regra "última ordem do último cep da rua" não tem como ser
-  // calculada, então ela simplesmente não é aplicada (o preenchimento de
-  // "final" vazio continua funcionando normalmente).
+  
   let idxOrdem = null;
   try {
     idxOrdem = findColumn(targetOrderColumn);
@@ -107,30 +96,19 @@ async function processStreetsExcel(file, options = {}) {
   }
 
   const rowCount = sheet.rowCount;
-
-  // As `skipRows` primeiras linhas são ignoradas por completo — nem viram
-  // cabeçalho, nem dado (não entram em nenhum cálculo, não são
-  // recoloridas, e não são tocadas de forma alguma) — mas continuam no
-  // arquivo final, exatamente como estavam. O cabeçalho de verdade é a
-  // primeira linha logo depois delas (linha `1 + skipRows`), e os dados
-  // começam na linha seguinte a essa.
+  
   const dataStartRow = 2 + skipRows;
   if (dataStartRow > rowCount + 1) {
     throw new Error(
       `O número de linhas a ignorar (${skipRows}) é maior do que a quantidade de linhas de dados da planilha (${Math.max(rowCount - 1, 0)}).`
     );
   }
-
-  // Pass 1: Map all unique CEPs for each street name
+  
   const cepsByStreet = new Map();
   const allCeps = new Set();
   let totalOriginalRows = 0;
-
-  // Para cada rua, guarda o maior valor de "ordem" já visto e o(s)
-  // número(s) de linha que atingem esse máximo — é isso que define "a
-  // última ordem do último cep da rua" (o maior ordem da rua inteira,
-  // somando todos os ceps dela).
-  const lastOrdemByStreet = new Map(); // streetName -> { maxOrdem, rows: Set<rowNumber> }
+  
+  const lastFinalByStreet = new Map();
 
   sheet.eachRow((row, rowNumber) => {
     if (rowNumber < dataStartRow) return; // linha de cabeçalho ou ignorada
@@ -152,24 +130,21 @@ async function processStreetsExcel(file, options = {}) {
     cepsByStreet.get(streetName).add(cep);
     allCeps.add(cep);
 
-    if (idxOrdem) {
-      const ordemNum = Number(getPlainValue(row.getCell(idxOrdem)));
-      if (Number.isFinite(ordemNum)) {
-        const atual = lastOrdemByStreet.get(streetName);
-        if (!atual || ordemNum > atual.maxOrdem) {
-          lastOrdemByStreet.set(streetName, { maxOrdem: ordemNum, rows: new Set([rowNumber]) });
-        } else if (ordemNum === atual.maxOrdem) {
+    if (idxFinal) {
+      const finalNum = Number(getPlainValue(row.getCell(idxFinal)));
+      if (Number.isFinite(finalNum)) {
+        const atual = lastFinalByStreet.get(streetName);
+        if (!atual || finalNum > atual.maxFinal) {
+          lastFinalByStreet.set(streetName, { maxFinal: finalNum, rows: new Set([rowNumber]) });
+        } else if (finalNum === atual.maxFinal) {
           atual.rows.add(rowNumber);
         }
       }
     }
   });
-
-  // Conjunto plano com o número de TODAS as linhas que representam "a
-  // última ordem do último cep" de alguma rua — usado nas Passes 2 pra
-  // decidir quando forçar o "final" para 99999 mesmo que já tenha valor.
+  
   const forcedFinalRows = new Set();
-  for (const { rows } of lastOrdemByStreet.values()) {
+  for (const { rows } of lastFinalByStreet.values()) {
     for (const r of rows) forcedFinalRows.add(r);
   }
 
@@ -178,29 +153,11 @@ async function processStreetsExcel(file, options = {}) {
     if (ceps.size > 1) totalStreetsWithMultipleCeps++;
   }
   
-  const cepColors = new Map();
-  const getColorForCep = (cep) => {
-    if (!cepColors.has(cep)) {
-      cepColors.set(cep, generateRandomColor());
-    }
-    return cepColors.get(cep);
-  };
-
   let totalDuplicatedGroups = 0;
   let totalCopiedRows = 0;
 
-  {
-    // ---------------------------------------------------------------------
-    // Agrupa por bloco: primeiro identifica blocos contíguos (mesma rua +
-    // mesmo cep, linhas em sequência), depois insere cada cópia como um
-    // bloco inteiro logo abaixo do bloco original.
-    //
-    // Não fazemos um sort global antes disso (pra preservar a formatação
-    // e a ordem original do arquivo) — os blocos são detectados na ordem
-    // física em que já aparecem na planilha. Se o arquivo não tiver as
-    // linhas de cada rua+cep já em sequência, blocos "quebrados" viram
-    // blocos separados.
-    // ---------------------------------------------------------------------
+  {    
+    // Agrupa por bloco
     const blocks = [];
     let currentBlock = null;
     for (let i = dataStartRow; i <= rowCount; i++) {
@@ -222,10 +179,7 @@ async function processStreetsExcel(file, options = {}) {
         blocks.push(currentBlock);
       }
     }
-
-    // Processa os blocos de baixo para cima: como cada bloco insere linhas
-    // sempre abaixo do seu próprio fim original, isso nunca desloca os
-    // índices dos blocos que ainda faltam processar (que estão acima).
+    
     const totalBlocks = blocks.length;
     let blocosProcessados = 0;
     let ultimoRespiro = Date.now();
@@ -235,21 +189,11 @@ async function processStreetsExcel(file, options = {}) {
     }
 
     for (let b = blocks.length - 1; b >= 0; b--) {
-      const block = blocks[b];
-
-      // Regra do "final": força 99999 na última ordem do último cep da rua
-      // (mesmo que já tenha valor); nas demais linhas, só preenche se
-      // estiver vazio — igual ao modo intercalado.
+      const block = blocks[b];      
       if (idxFinal) {
         for (let r = block.startRow; r <= block.endRow; r++) {
-          const finalCell = sheet.getRow(r).getCell(idxFinal);
           if (forcedFinalRows.has(r)) {
-            finalCell.value = 99999;
-          } else {
-            const cellValue = getPlainValue(finalCell);
-            if (cellValue === null || cellValue === undefined || String(cellValue).trim() === '') {
-              finalCell.value = 99999;
-            }
+            sheet.getRow(r).getCell(idxFinal).value = 9999;
           }
         }
       }
@@ -262,9 +206,7 @@ async function processStreetsExcel(file, options = {}) {
           streetName: block.streetNameRaw || block.streetName,
         });
       }
-      // Só cede o controle ao navegador de vez em quando (no máximo a cada
-      // 100ms de trabalho contínuo) — ceder a cada bloco individualmente
-      // deixaria o processamento bem mais lento em planilhas grandes.
+      
       if (Date.now() - ultimoRespiro > 100) {
         await nextTick();
         ultimoRespiro = Date.now();
@@ -273,9 +215,7 @@ async function processStreetsExcel(file, options = {}) {
       const streetCeps = Array.from(cepsByStreet.get(block.streetName) || []);
       const otherCeps = streetCeps.filter((c) => c !== block.cep);
       if (otherCeps.length === 0) continue;
-
-      // Retrato (snapshot) das linhas originais do bloco, tiradas ANTES de
-      // qualquer inserção (a inserção desloca índices de linha abaixo dela).
+      
       const snapshot = [];
       for (let r = block.startRow; r <= block.endRow; r++) {
         const row = sheet.getRow(r);
@@ -285,15 +225,10 @@ async function processStreetsExcel(file, options = {}) {
         });
         snapshot.push({ height: row.height, cells });
       }
-
-      // Insere os blocos-cópia em ordem reversa de "otherCeps": como cada
-      // inserção acontece sempre logo após o bloco original (mesma
-      // posição), a última cópia inserida acaba ficando mais perto do
-      // original — inserindo de trás pra frente, a ordem final das cópias
-      // sai crescente, igual à ordem de "otherCeps".
+            
       const reversedTargets = [...otherCeps].reverse();
       for (const targetCep of reversedTargets) {
-        const color = getColorForCep(targetCep);
+        const color = generateRandomColor();
         totalDuplicatedGroups++;
         totalCopiedRows += snapshot.length;
 
@@ -321,17 +256,7 @@ async function processStreetsExcel(file, options = {}) {
     }
   }
 
-  // Ordenação final (opcional): reordena TODA a região processada (da
-  // primeira linha de dados até a última linha do arquivo, já incluindo as
-  // cópias inseridas) por CEP crescente e, em caso de empate, por "ordem"
-  // crescente. As linhas ignoradas (`skipRows`) e o cabeçalho ficam de
-  // fora — nunca são tocadas nem se movem.
-  //
-  // Como não dá pra simplesmente "mover" linhas no ExcelJS, tiramos um
-  // retrato de cada linha da região (valores + estilo, igual já fazemos
-  // pra duplicar blocos), ordenamos esse retrato em memória, e
-  // reescrevemos cada linha física na nova ordem — cor e formatação vêm
-  // junto porque fazem parte do retrato.
+  // Ordenação final (opcional)
   if (options.sortOutput === true) {
     const finalRowCount = sheet.rowCount;
     const registros = [];
@@ -346,9 +271,6 @@ async function processStreetsExcel(file, options = {}) {
       registros.push({ height: row.height, cells, cepValor, ordemValor });
     }
 
-    // Array.prototype.sort é estável (garantido desde ES2019): quando o
-    // comparador devolve 0 (ex.: sem coluna "ordem" pra desempatar), a
-    // ordem relativa original é preservada em vez de virar aleatória.
     registros.sort((a, b) => {
       const porCep = a.cepValor.localeCompare(b.cepValor, 'pt-BR', { numeric: true });
       if (porCep !== 0) return porCep;
@@ -390,9 +312,7 @@ async function processStreetsExcel(file, options = {}) {
   };
 }
 
-// =====================================================================
-// UI Logic
-// =====================================================================
+// UI
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const fileNameEl = document.getElementById('fileName');
@@ -406,20 +326,19 @@ const results = document.getElementById('results');
 const downloadLink = document.getElementById('downloadLink');
 const resetBtn = document.getElementById('resetBtn');
 
-// New DOM elements for the history feature
+
 const historySection = document.getElementById('historySection');
 const historyList = document.getElementById('historyList');
 
-// Map to track how many times a base file name has been generated
 const fileGenerationTracker = new Map();
 
-function updateProgress({ current, total, streetName }) {
-  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+function updateProgress({ current, total, streetName }) {  
+  const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
   progressFillEl.style.width = pct + '%';
   progressTrackEl.setAttribute('aria-valuenow', String(pct));
   progressDetailEl.textContent = streetName
-    ? `${pct}% - street ${current} of ${total}: "${streetName}"`
-    : `${pct}% - ${total} streets found`;
+    ? `${pct}% - trecho ${current} de ${total}: "${streetName}"`
+    : `${pct}% - ${total} trechos encontrados`;
 }
 
 function resetUI() {
@@ -457,16 +376,16 @@ async function handleFile(file) {
   fileNameEl.hidden = false;
   fileNameEl.textContent = file.name;
   statusEl.hidden = false;
-  statusTextEl.textContent = 'Processing spreadsheet...';
+  statusTextEl.textContent = 'Processando planilha…';
   progressFillEl.style.width = '0%';
   progressTrackEl.setAttribute('aria-valuenow', '0');
-  progressDetailEl.textContent = 'Reading file...';
+  progressDetailEl.textContent = 'Lendo arquivo…';
 
   try {
     const baseName = file.name.replace(/\.xlsx$/i, '');
     const processedBaseName = `${baseName}_processado`;
     
-    // Determine the versioned file name
+    // nome do arquivo (com versionamento)
     const count = fileGenerationTracker.get(processedBaseName) || 0;
     const finalDownloadName = count === 0 
       ? `${processedBaseName}.xlsx` 
@@ -479,8 +398,7 @@ async function handleFile(file) {
     const orderColName = document.getElementById('colOrderInput').value.trim() || 'ordem';
     const skipRows = document.getElementById('skipRowsInput').value.trim() || '0';
     const sortOutput = document.getElementById('sortOutputInput').checked;
-
-    // Start performance timer
+    
     const startProcessingTime = performance.now();
 
     const { blob, summary } = await processStreetsExcel(file, {
@@ -492,8 +410,7 @@ async function handleFile(file) {
       sortOutput,
       onProgress: updateProgress
     });
-
-    // End performance timer and calculate duration in seconds
+    
     const endProcessingTime = performance.now();
     const durationSeconds = ((endProcessingTime - startProcessingTime) / 1000).toFixed(2);
 
@@ -503,20 +420,16 @@ async function handleFile(file) {
     document.getElementById('statGrupos').textContent = summary.totalDuplicatedGroups;
     document.getElementById('statCopiadas').textContent = summary.totalCopiedRows;
     document.getElementById('statTotal').textContent = summary.totalOutputRows;
-
-    // Create object URL for download
+    
     const currentObjectUrl = URL.createObjectURL(blob);
     downloadLink.href = currentObjectUrl;
     downloadLink.download = finalDownloadName;
-    
-    // Get current time and human-readable file size
+        
     const creationTime = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
     const humanReadableSize = formatBytes(blob.size);
-    
-    // Build the history list item (<li>)
+        
     const historyItem = document.createElement('li');
-    
-    // Inline SVG for the Excel Icon
+        
    const svgIcon = `
   <svg
     class="history-icon"
@@ -568,16 +481,14 @@ async function handleFile(file) {
     />
   </svg>
 `;
-    
-    // Create the anchor link for the file
+        
     const historyAnchor = document.createElement('a');
     historyAnchor.href = currentObjectUrl;
     historyAnchor.download = finalDownloadName;
     historyAnchor.textContent = finalDownloadName;
     historyAnchor.className = 'history-link';
-    historyAnchor.title = finalDownloadName; // Tooltip for truncated names
-    
-    // Create the metadata container (Size, Processing Time, Creation Time)
+    historyAnchor.title = finalDownloadName;
+        
     const metaContainer = document.createElement('div');
     metaContainer.className = 'history-meta';
     
@@ -586,27 +497,24 @@ async function handleFile(file) {
     
     const timeSpan = document.createElement('span');
     timeSpan.textContent = `${creationTime}`;
-    
-    // Assemble the elements
+        
     metaContainer.appendChild(sizeSpan);
     metaContainer.appendChild(timeSpan);
     
     historyItem.innerHTML = svgIcon;
     historyItem.appendChild(historyAnchor);
     historyItem.appendChild(metaContainer);
-    
-    // Prepend to show the most recent files at the top
+        
     historyList.prepend(historyItem);
     historySection.hidden = false;
 
     statusEl.hidden = true;
     results.hidden = false;
   } catch (err) {
-    showError(err.message || 'An unexpected error occurred while processing the file.');
+    showError(err.message || 'Ocorreu um erro inesperado ao processar o arquivo.');
   }
 }
 
-// Event Listeners remain the same
 dropzone.addEventListener('click', () => fileInput.click());
 dropzone.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }

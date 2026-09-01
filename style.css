@@ -78,7 +78,7 @@ h1 {
 .dropzone {
   border: 1.5px dashed var(--line-strong);
   border-radius: 12px;
-  padding: 20px 16px; /* Reduced from 32px 20px */
+  padding: 20px 16px; 
   text-align: center;
   cursor: pointer;
   transition: border-color 0.15s ease, background-color 0.15s ease;
@@ -114,10 +114,6 @@ h1 {
   color: var(--muted);
 }
 
-/* `.status { display: flex }` ties in specificity with the default
-   browser rule `[hidden] { display: none }` — and since ours comes later,
-   it wins and the `hidden` attribute is ignored. This rule has a higher
-   specificity (class + attribute) and fixes this. */
 .status[hidden] {
   display: none;
 }
@@ -270,7 +266,6 @@ h1 {
   .stat:nth-last-child(-n+2) { border-bottom: none; }
 }
 
-/* Estilos para o novo input de configuração */
 .input-group {
   margin-bottom: 20px;
   display: flex;
@@ -322,7 +317,6 @@ h1 {
   height: 16px;
 }
 
-/* Updated History Section Styles */
 .history-section {
   margin-top: 24px;
   padding-top: 20px;
@@ -355,12 +349,12 @@ h1 {
   border: 1px solid var(--line);
 }
 
-/* Styling for the Excel SVG icon */
+
 .history-icon {
   width: 20px;
   height: 20px;
   margin-right: 10px;
-  color: #107c41; /* Official Excel green */
+  color: #107c41;
   flex-shrink: 0;
 }
 
@@ -381,7 +375,6 @@ h1 {
   opacity: 0.8;
 }
 
-/* Metadata formatting (time, size, processing duration) */
 .history-meta {
   margin-left: auto;
   font-size: 12px;
