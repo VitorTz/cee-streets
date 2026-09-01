@@ -35,6 +35,12 @@ function getPlainValue(cell) {
   return v && typeof v === 'object' ? v.result : v;
 }
 
+function isEmptyFinalValue(value) {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string' && value.trim() === '') return true;
+  return false;
+}
+
 function nextTick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -109,6 +115,7 @@ async function processStreetsExcel(file, options = {}) {
   let totalOriginalRows = 0;
   
   const lastFinalByStreet = new Map();
+  const emptyFinalByStreet = new Map();
 
   sheet.eachRow((row, rowNumber) => {
     if (rowNumber < dataStartRow) return; // linha de cabeçalho ou ignorada
@@ -131,21 +138,38 @@ async function processStreetsExcel(file, options = {}) {
     allCeps.add(cep);
 
     if (idxFinal) {
-      const finalNum = Number(getPlainValue(row.getCell(idxFinal)));
-      if (Number.isFinite(finalNum)) {
-        const atual = lastFinalByStreet.get(streetName);
-        if (!atual || finalNum > atual.maxFinal) {
-          lastFinalByStreet.set(streetName, { maxFinal: finalNum, rows: new Set([rowNumber]) });
-        } else if (finalNum === atual.maxFinal) {
-          atual.rows.add(rowNumber);
+      const finalRaw = getPlainValue(row.getCell(idxFinal));
+      if (isEmptyFinalValue(finalRaw)) {
+        if (!emptyFinalByStreet.has(streetName)) {
+          emptyFinalByStreet.set(streetName, new Set());
+        }
+        emptyFinalByStreet.get(streetName).add(rowNumber);
+      } else {
+        const finalNum = Number(finalRaw);
+        if (Number.isFinite(finalNum)) {
+          const atual = lastFinalByStreet.get(streetName);
+          if (!atual || finalNum > atual.maxFinal) {
+            lastFinalByStreet.set(streetName, { maxFinal: finalNum, rows: new Set([rowNumber]) });
+          } else if (finalNum === atual.maxFinal) {
+            atual.rows.add(rowNumber);
+          }
         }
       }
     }
   });
   
   const forcedFinalRows = new Set();
-  for (const { rows } of lastFinalByStreet.values()) {
-    for (const r of rows) forcedFinalRows.add(r);
+  const streetsWithFinalInfo = new Set([...lastFinalByStreet.keys(), ...emptyFinalByStreet.keys()]);
+  for (const streetName of streetsWithFinalInfo) {
+    const emptyRows = emptyFinalByStreet.get(streetName);
+    if (emptyRows && emptyRows.size > 0) {
+      for (const r of emptyRows) forcedFinalRows.add(r);
+    } else {
+      const atual = lastFinalByStreet.get(streetName);
+      if (atual) {
+        for (const r of atual.rows) forcedFinalRows.add(r);
+      }
+    }
   }
 
   let totalStreetsWithMultipleCeps = 0;
