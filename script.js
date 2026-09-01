@@ -259,31 +259,42 @@ async function processStreetsExcel(file, options = {}) {
   // Ordenação final (opcional)
   if (options.sortOutput === true) {
     const finalRowCount = sheet.rowCount;
-    const registros = [];
+    const records = [];
+    
     for (let r = dataStartRow; r <= finalRowCount; r++) {
       const row = sheet.getRow(r);
       const cells = [];
       row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
         cells.push({ colNumber, value: cell.value, style: cell.style });
       });
-      const cepValor = String(getPlainValue(row.getCell(idxCep)) ?? '').trim();
-      const ordemValor = idxOrdem ? Number(getPlainValue(row.getCell(idxOrdem))) : NaN;
-      registros.push({ height: row.height, cells, cepValor, ordemValor });
+      
+      const streetValue = String(getPlainValue(row.getCell(idxStreetName)) ?? '').trim();
+      const cepValue = String(getPlainValue(row.getCell(idxCep)) ?? '').trim();
+      const orderValue = idxOrdem ? Number(getPlainValue(row.getCell(idxOrdem))) : NaN;
+      
+      records.push({ height: row.height, cells, streetValue, cepValue, orderValue });
     }
 
-    registros.sort((a, b) => {
-      const porCep = a.cepValor.localeCompare(b.cepValor, 'pt-BR', { numeric: true });
-      if (porCep !== 0) return porCep;
-      if (Number.isFinite(a.ordemValor) && Number.isFinite(b.ordemValor)) {
-        return a.ordemValor - b.ordemValor;
+    records.sort((a, b) => {
+      // ordena pelo nome da rua (asc)
+      const byStreet = a.streetValue.localeCompare(b.streetValue, 'pt-BR', { numeric: true });
+      if (byStreet !== 0) return byStreet;
+
+      // ordena pelo cep (asc)
+      const byCep = a.cepValue.localeCompare(b.cepValue, 'pt-BR', { numeric: true });
+      if (byCep !== 0) return byCep;
+      
+      // ordena pela ordem (asc)
+      if (Number.isFinite(a.orderValue) && Number.isFinite(b.orderValue)) {
+        return a.orderValue - b.orderValue;
       }
       return 0;
     });
 
-    registros.forEach((registro, idx) => {
+    records.forEach((record, idx) => {
       const row = sheet.getRow(dataStartRow + idx);
-      row.height = registro.height;
-      for (const c of registro.cells) {
+      row.height = record.height;
+      for (const c of record.cells) {
         const targetCell = row.getCell(c.colNumber);
         targetCell.value = c.value;
         targetCell.style = c.style;
